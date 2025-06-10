@@ -1,5 +1,10 @@
 const si = require('systeminformation');
 const axios = require('axios');
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 // Configuration
@@ -51,18 +56,71 @@ async function sendDiscordNotification(message) {
     }
 }
 
+async function getCPUTemperature() {
+    try {
+        // Get CPU info first
+        const cpuInfo = await si.cpu();
+        const isIntel = cpuInfo.manufacturer.toLowerCase().includes('intel');
+        const isAMD = cpuInfo.manufacturer.toLowerCase().includes('amd');
+
+        if (isIntel) {
+            // For Intel processors (like i7-10700)
+            try {
+                const { stdout } = await execPromise('powershell -Command "Get-WmiObject -Namespace root\\wmi -Class MSAcpi_ThermalZoneTemperature | Select-Object -ExpandProperty CurrentTemperature"');
+                const temp = parseInt(stdout.trim());
+                if (!isNaN(temp)) {
+                    // Convert from Kelvin to Celsius
+                    return (temp / 10 - 273.15);
+                }
+            } catch (error) {
+                console.log('Intel temperature check failed:', error.message);
+            }
+        } else if (isAMD) {
+            // For AMD processors (like Ryzen 5800H)
+            try {
+                const { stdout } = await execPromise('powershell -Command "Get-WmiObject -Namespace root\\cimv2 -Class Win32_PerfFormattedData_Counters_ThermalZoneInformation | Select-Object -ExpandProperty Temperature"');
+                const temp = parseFloat(stdout.trim());
+                if (!isNaN(temp)) {
+                    return temp;
+                }
+            } catch (error) {
+                console.log('AMD temperature check failed:', error.message);
+            }
+        }
+
+        // If the above methods fail, try the systeminformation method
+        const temp = await si.cpuTemperature();
+        if (temp && temp.main !== null) {
+            return temp.main;
+        }
+
+        // If all methods fail, return null
+        console.log('Temperature monitoring not available. CPU Info:', {
+            manufacturer: cpuInfo.manufacturer,
+            brand: cpuInfo.brand,
+            physicalCores: cpuInfo.physicalCores,
+            cores: cpuInfo.cores
+        });
+        return null;
+    } catch (error) {
+        console.log('Error getting CPU temperature:', error.message);
+        return null;
+    }
+}
+
 async function checkSystemUsage() {
     try {
         const cpuUsage = await si.currentLoad();
         const memUsage = await si.mem();
-        const cpuTemp = await si.cpuTemperature();
+        const currentCpuTemp = await getCPUTemperature();
 
         const currentCpuLoad = cpuUsage.currentLoad;
         const currentRamUsagePercent = (memUsage.used / memUsage.total) * 100;
-        const currentCpuTemp = cpuTemp.main;
         const currentTime = Date.now();
 
-        console.log(`Monitoring - CPU: ${currentCpuLoad.toFixed(2)}%, RAM: ${currentRamUsagePercent.toFixed(2)}%, Temp: ${currentCpuTemp !== null ? currentCpuTemp.toFixed(1) + '°C' : 'N/A'}`);
+        // Simple temperature display - just show N/A if not available
+        const tempDisplay = currentCpuTemp !== null ? `${currentCpuTemp.toFixed(1)}°C` : 'N/A';
+        console.log(`Monitoring - CPU: ${currentCpuLoad.toFixed(2)}%, RAM: ${currentRamUsagePercent.toFixed(2)}%, Temp: ${tempDisplay}`);
 
         if (currentCpuLoad > CPU_THRESHOLD_PERCENT) {
             if (currentTime - lastCPUAlertTime > ALERT_COOLDOWN_MS) {
